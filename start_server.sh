@@ -7,7 +7,7 @@ LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-gemma4}"
 MODELS_DIR="$HOME/gemma4-models"
 QUANT="${1:-UD-Q4_K_XL}"
 
-MODEL="$MODELS_DIR/gemma-4-12B-it-${QUANT}.gguf"
+MODEL=$(ls "$MODELS_DIR"/gemma-4-12*-it-${QUANT}.gguf 2>/dev/null | head -1)
 MMPROJ="$MODELS_DIR/mmproj-BF16.gguf"
 
 if [ ! -f "$MODEL" ]; then
