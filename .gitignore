@@ -1,0 +1,6 @@
+.env
+.tagger_state.json
+tagger.log
+__pycache__/
+.venv/
+*.pyc
