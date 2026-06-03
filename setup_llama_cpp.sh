@@ -62,9 +62,19 @@ fi
 
 echo ""
 echo "=== Building with CUDA (arch=$CUDA_ARCH) ==="
+# Ensure nvcc is findable — CUDA toolkit sometimes installs to non-standard locations
+if [ -f /usr/local/cuda/bin/nvcc ]; then
+    export CUDACXX=/usr/local/cuda/bin/nvcc
+    export PATH="/usr/local/cuda/bin:$PATH"
+elif [ -f /usr/bin/nvcc ]; then
+    export CUDACXX=/usr/bin/nvcc
+fi
+echo "nvcc: $(command -v nvcc)"
+
 cmake -B build \
     -DBUILD_SHARED_LIBS=OFF \
     -DGGML_CUDA=ON \
+    "-DCMAKE_CUDA_COMPILER=$CUDACXX" \
     "-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH"
 
 cmake --build build --config Release -j"$(nproc)" --clean-first \
