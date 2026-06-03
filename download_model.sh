@@ -13,25 +13,23 @@ mkdir -p "$MODELS_DIR"
 # UD-Q4_K_XL: ~7.5 GB — Unsloth Dynamic 4-bit (recommended by Unsloth)
 QUANT="${1:-UD-Q4_K_XL}"
 
-echo "=== Installing huggingface_hub ==="
-# Use uv if available, fall back to pip
-if command -v uv &>/dev/null; then
-    uv pip install --system huggingface_hub hf_transfer
-elif command -v pip3 &>/dev/null; then
-    pip3 install -q huggingface_hub hf_transfer
-elif command -v pip &>/dev/null; then
-    pip install -q huggingface_hub hf_transfer
-else
-    echo "ERROR: Neither uv, pip3, nor pip found. Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
-
-echo ""
 echo "=== Downloading Gemma 4 12B ($QUANT) ==="
 echo "Target: $MODELS_DIR"
 
+# Use uvx to run hf CLI without installing anything system-wide
+if command -v uvx &>/dev/null; then
+    HF="uvx --from huggingface_hub hf"
+elif command -v uv &>/dev/null; then
+    HF="uvx --from huggingface_hub hf"
+elif command -v hf &>/dev/null; then
+    HF="hf"
+else
+    echo "ERROR: No way to run 'hf' CLI. Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
+
 # Download model + mmproj from Unsloth
-hf download "unsloth/gemma-4-12B-it-GGUF" \
+$HF download "unsloth/gemma-4-12B-it-GGUF" \
     --include "*mmproj-BF16*" \
     --include "*${QUANT}*" \
     --local-dir "$MODELS_DIR"
