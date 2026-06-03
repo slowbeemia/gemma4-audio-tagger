@@ -51,7 +51,8 @@ uv sync
 ### 2. Mount SMB share
 
 ```bash
-sudo mount -t cifs //orange/Assets /mnt/orange -o credentials=/etc/cifs-credentials,ro
+# WSL2: use drvfs (passes through Windows SMB client)
+sudo mount -t drvfs '\\orange\Assets' /mnt/orange -o credentials=/etc/cifs-credentials,ro,uid=1000,gid=1000
 ```
 
 ### 3. Configure
