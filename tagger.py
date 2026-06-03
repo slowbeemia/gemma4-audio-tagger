@@ -309,7 +309,9 @@ def main() -> None:
             if send_to_asset_manager(asset_id, result, mgr):
                 tagged += 1
                 state["tagged"] += 1
-                log(f"  ✓ {result.get('tags', '')[:80]}")
+                log(f"  ✓ {result.get('tags', '')[:100]}")
+                if result.get("description"):
+                    log(f"    {result['description'][:120]}")
         else:
             state["errors"] += 1
 
