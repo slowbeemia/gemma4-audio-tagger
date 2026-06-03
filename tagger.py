@@ -36,6 +36,8 @@ LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8001")
 ASSET_MANAGER_URL = os.getenv("ASSET_MANAGER_URL", "http://bob.fritz.box:8899")
 DELAY_SEC = float(os.getenv("DELAY_SEC", "2"))
 API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "50"))
+PATH_MAP_FROM = os.getenv("PATH_MAP_FROM", "//orange/Assets")
+PATH_MAP_TO = os.getenv("PATH_MAP_TO", "/mnt/orange")
 
 STATE_FILE = Path(__file__).parent / ".tagger_state.json"
 LOG_FILE = Path(__file__).parent / "tagger.log"
@@ -116,7 +118,9 @@ def fetch_untagged_assets(client: httpx.Client, page_size: int = 50) -> list[dic
 
 def tag_audio(full_path: str, filename: str, rel_path: str, client: httpx.Client) -> dict | None:
     """Send audio to llama-server, get tags back."""
-    path = Path(full_path)
+    # Map DB path to local mount (//orange/Assets → /mnt/orange)
+    local_path = full_path.replace(PATH_MAP_FROM, PATH_MAP_TO, 1)
+    path = Path(local_path)
     if not path.exists():
         log(f"  SKIP: file not found: {full_path}")
         return None
