@@ -111,20 +111,26 @@ def report_status(state: dict, status: str = "running") -> None:
         log(f"Status report failed: {e}")
 
 
-def convert_to_wav_16khz(audio_path: Path) -> bytes:
-    """Convert any audio file to 16kHz mono WAV bytes using ffmpeg."""
+def convert_to_wav_16khz(audio_path: Path, max_duration: float = 0) -> bytes:
+    """Convert any audio file to 16kHz mono WAV bytes using ffmpeg.
+
+    If max_duration > 0, trim to the first N seconds (for models with audio limits).
+    Gemma 4 12B supports max 30s; we trim to 20s for longer files."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = Path(tmp.name)
 
     try:
+        cmd = [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ar", "16000", "-ac", "1",
+            "-sample_fmt", "s16",
+        ]
+        if max_duration > 0:
+            cmd += ["-t", str(max_duration)]
+        cmd += ["-loglevel", "error", str(tmp_path)]
+
         subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(audio_path),
-                "-ar", "16000", "-ac", "1",
-                "-sample_fmt", "s16",
-                "-loglevel", "error",
-                str(tmp_path),
-            ],
+            cmd,
             check=True,
             capture_output=True,
             timeout=30,
@@ -142,20 +148,18 @@ def tag_audio(audio_path: str, relative_path: str, client: httpx.Client) -> dict
         log(f"  SKIP: file not found: {audio_path}")
         return None
 
-    # Convert to 16kHz WAV
+    # Convert to 16kHz WAV — trim to 20s if longer (Gemma max is 30s)
     try:
-        wav_bytes = convert_to_wav_16khz(full_path)
+        wav_bytes = convert_to_wav_16khz(full_path, max_duration=20.0)
     except subprocess.CalledProcessError as e:
         log(f"  ERROR: ffmpeg conversion failed: {e.stderr.decode()[:200]}")
         return None
 
-    # Check 30s limit
+    # Log if trimmed
     wav_size = len(wav_bytes)
-    # WAV header = 44 bytes, 16-bit mono 16kHz = 32000 bytes/sec
     audio_duration = (wav_size - 44) / 32000 if wav_size > 44 else 0
-    if audio_duration > 30:
-        log(f"  SKIP: audio too long ({audio_duration:.1f}s > 30s max)")
-        return None
+    if audio_duration > 19.9:
+        log(f"  (original >20s, using first 20s)")
 
     audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
 
