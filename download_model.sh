@@ -14,7 +14,17 @@ mkdir -p "$MODELS_DIR"
 QUANT="${1:-UD-Q4_K_XL}"
 
 echo "=== Installing huggingface_hub ==="
-pip install -q huggingface_hub hf_transfer
+# Use uv if available, fall back to pip
+if command -v uv &>/dev/null; then
+    uv pip install --system huggingface_hub hf_transfer
+elif command -v pip3 &>/dev/null; then
+    pip3 install -q huggingface_hub hf_transfer
+elif command -v pip &>/dev/null; then
+    pip install -q huggingface_hub hf_transfer
+else
+    echo "ERROR: Neither uv, pip3, nor pip found. Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
 
 echo ""
 echo "=== Downloading Gemma 4 12B ($QUANT) ==="
