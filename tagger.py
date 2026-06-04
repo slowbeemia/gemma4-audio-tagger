@@ -2,8 +2,9 @@
 """
 gemma4-audio-tagger — Batch audio tagging via Gemma 4 12B (llama.cpp).
 
-Connects to llama-server on localhost:8001. Audio is base64-encoded 16kHz
-mono WAV, sent as input_audio content blocks via the OpenAI-compatible API.
+Uses llama-mtmd-cli (the multimodal CLI that ships with llama.cpp) as a
+subprocess. llama-server does NOT support input_audio — the CLI is the
+supported path for Gemma 4 audio inference.
 
 Usage:
     uv run python3 tagger.py                  # tag next 10 untagged
@@ -13,13 +14,12 @@ Usage:
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
 import subprocess
-import tempfile
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,8 +33,15 @@ if _ENV_FILE.exists():
     from dotenv import load_dotenv
     load_dotenv(_ENV_FILE)
 
-LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8001")
-LLAMA_MODEL = os.getenv("LLAMA_MODEL", "gemma-4-12b-it")
+LLAMA_MTMD_CLI = os.getenv("LLAMA_MTMD_CLI", "llama-mtmd-cli")
+LLAMA_MODEL_PATH = os.getenv(
+    "LLAMA_MODEL_PATH",
+    "/home/dirk/gemma4-models/gemma-4-12b-it-UD-Q4_K_XL.gguf",
+)
+LLAMA_MMPROJ_PATH = os.getenv(
+    "LLAMA_MMPROJ_PATH",
+    "/home/dirk/gemma4-models/mmproj-BF16.gguf",
+)
 ASSET_MANAGER_URL = os.getenv("ASSET_MANAGER_URL", "http://bob.fritz.box:8899")
 DELAY_SEC = float(os.getenv("DELAY_SEC", "2"))
 API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "50"))
@@ -86,8 +93,8 @@ def fetch_untagged(client: httpx.Client, page_size: int = 50) -> list[dict]:
     return all_assets
 
 
-def audio_to_base64_wav(filepath: Path) -> str | None:
-    """Convert any audio file to 16kHz mono WAV, return base64 string."""
+def convert_to_16khz_wav(filepath: Path) -> str | None:
+    """Convert audio to 16kHz mono WAV, return temp file path."""
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = tmp.name
     tmp.close()
@@ -99,14 +106,9 @@ def audio_to_base64_wav(filepath: Path) -> str | None:
             "-loglevel", "error", tmp_path,
         ]
         subprocess.run(cmd, check=True, timeout=10)
-
-        with open(tmp_path, "rb") as f:
-            wav_bytes = f.read()
-
-        os.unlink(tmp_path)
-        return base64.b64encode(wav_bytes).decode("ascii")
+        return tmp_path
     except Exception as e:
-        log(f"  ERROR: ffmpeg conversion failed for {filepath}: {e}")
+        log(f"  ERROR: ffmpeg conversion failed: {e}")
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -115,69 +117,73 @@ def audio_to_base64_wav(filepath: Path) -> str | None:
 
 
 def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
-    """Send audio to llama-server via input_audio content block."""
+    """Send audio to llama-mtmd-cli, return parsed tags."""
     local_path = full_path.replace(PATH_MAP_FROM, PATH_MAP_TO, 1)
     path = Path(local_path)
     if not path.exists():
         log(f"  SKIP: file not found: {local_path}")
         return None
 
-    b64_wav = audio_to_base64_wav(path)
-    if not b64_wav:
+    wav_path = convert_to_16khz_wav(path)
+    if not wav_path:
         return None
 
-    payload = {
-        "model": LLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": USER_PROMPT},
-                    {"type": "input_audio", "input_audio": {"data": b64_wav}},
-                ],
-            },
-        ],
-        "temperature": 0.0,
-        "max_tokens": 300,
-    }
+    # Build prompt: system + user combined (llama-mtmd-cli takes one prompt string)
+    full_prompt = f"{SYSTEM_PROMPT}\n\n{USER_PROMPT}"
+
+    cmd = [
+        LLAMA_MTMD_CLI,
+        "-m", LLAMA_MODEL_PATH,
+        "--mmproj", LLAMA_MMPROJ_PATH,
+        "--audio", wav_path,
+        "--temp", "0.0",
+        "-p", full_prompt,
+        "--no-display-prompt",
+    ]
 
     try:
-        with httpx.Client(timeout=httpx.Timeout(120)) as client:
-            resp = client.post(
-                f"{LLAMA_SERVER_URL}/v1/chat/completions",
-                json=payload,
-            )
-            resp.raise_for_status()
-    except httpx.HTTPError as e:
-        log(f"  ERROR: llama-server request failed: {e}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        log(f"  ERROR: llama-mtmd-cli timed out (120s)")
+        _cleanup_wav(wav_path)
+        return None
+    except FileNotFoundError:
+        log(f"  ERROR: {LLAMA_MTMD_CLI} not found. Build llama.cpp first.")
+        _cleanup_wav(wav_path)
         return None
 
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"]
+    _cleanup_wav(wav_path)
 
-    # Log raw output for debugging
-    log(f"  [RAW] {repr(content)[:300]}")
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
 
-    # Clean markdown code fences
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
-
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError as e:
-                log(f"  ERROR: JSON parse failed on regex match: {e}")
-        log(f"  ERROR: Content is not valid JSON.")
+    if result.returncode != 0:
+        log(f"  ERROR: llama-mtmd-cli exit={result.returncode}")
+        if stderr:
+            log(f"  [STDERR] {stderr[:300]}")
         return None
+
+    # Log raw output
+    log(f"  [RAW] {repr(stdout[:400])}")
+
+    # Find JSON in output (model may add surrounding text)
+    match = re.search(r"\{[^{}]*\"tags\"[^{}]*\}", stdout, re.DOTALL)
+    if not match:
+        match = re.search(r"\{.*\}", stdout, re.DOTALL)
+
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError as e:
+            log(f"  ERROR: JSON parse failed: {e}")
+
+    log(f"  ERROR: No valid JSON in output")
+    return None
 
 
 def send_to_asset_manager(asset_id: int, tags: dict, client: httpx.Client) -> bool:
@@ -198,6 +204,13 @@ def send_to_asset_manager(asset_id: int, tags: dict, client: httpx.Client) -> bo
         return False
 
 
+def _cleanup_wav(path: str) -> None:
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+
+
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
@@ -211,25 +224,28 @@ def save_state(state: dict) -> None:
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Gemma 4 12B Audio Tagger (llama.cpp)")
+    parser = argparse.ArgumentParser(description="Gemma 4 Audio Tagger (llama.cpp)")
     parser.add_argument("--max", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     log("=" * 60)
-    log("Gemma 4 12B Audio Tagger (llama.cpp)")
-    log(f"Server: {LLAMA_SERVER_URL}")
-    log(f"Model:  {LLAMA_MODEL}")
-    log(f"Asset Manager: {ASSET_MANAGER_URL}")
+    log("Gemma 4 Audio Tagger (llama-mtmd-cli)")
+    log(f"CLI:     {LLAMA_MTMD_CLI}")
+    log(f"Model:   {LLAMA_MODEL_PATH}")
+    log(f"MMProj:  {LLAMA_MMPROJ_PATH}")
+    log(f"Asset Mgr: {ASSET_MANAGER_URL}")
 
-    # Quick health check
+    # Quick check: is llama-mtmd-cli available?
     try:
-        r = httpx.get(f"{LLAMA_SERVER_URL}/v1/models", timeout=5)
-        r.raise_for_status()
-        log(f"llama-server: OK ({r.json().get('data', [{}])[0].get('id', '?')})")
-    except Exception as e:
-        log(f"FATAL: llama-server not reachable: {e}")
+        r = subprocess.run([LLAMA_MTMD_CLI, "--version"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            log(f"llama-mtmd-cli: OK")
+        else:
+            log(f"WARNING: {LLAMA_MTMD_CLI} --version failed, continuing anyway...")
+    except FileNotFoundError:
+        log(f"FATAL: {LLAMA_MTMD_CLI} not found in PATH!")
         sys.exit(1)
 
     mgr = httpx.Client(timeout=httpx.Timeout(30))
@@ -254,17 +270,20 @@ def main() -> None:
     start_time = time.time()
 
     tagged = 0
+    tried = 0  # count attempts, stop after max_count tries
     for asset in assets:
+        if tried >= max_count:
+            break
+
         asset_id = asset["id"]
+        if str(asset_id) in processed:
+            continue
+
+        tried += 1
         filename = asset["filename"]
         full_path = asset["full_path"]
 
-        if str(asset_id) in processed:
-            continue
-        if tagged >= max_count:
-            break
-
-        log(f"[{tagged + 1}/{max_count}] #{asset_id} {filename}")
+        log(f"[{tagged}/{tried}/{max_count}] #{asset_id} {filename}")
 
         result = tag_audio(full_path, filename, asset.get("rel_path", filename))
         if result:
@@ -283,7 +302,7 @@ def main() -> None:
         state["processed"] = list(processed)
         state["runtime_s"] = int(time.time() - start_time)
 
-        if tagged % 5 == 0:
+        if tagged % 5 == 0 and tagged > 0:
             save_state(state)
 
         time.sleep(DELAY_SEC)
