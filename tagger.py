@@ -154,7 +154,7 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         # This guarantees the model receives the actual audio features and input masks.
         inputs = processor(
             text=prompt,
-            audios=audio_data,
+            audio=audio_data,
             sampling_rate=16000,
             return_tensors="pt"
         ).to(model.device)
@@ -283,7 +283,7 @@ def main() -> None:
         MODEL_ID,
         device_map="auto",
         quantization_config=quantization_config,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
     log(f"Model loaded on: {model.device}")
