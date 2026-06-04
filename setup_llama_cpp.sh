@@ -2,6 +2,7 @@
 # setup_llama_cpp.sh — Build llama.cpp with CUDA on WSL2/Ubuntu
 # Run this ONCE on TheGrey WSL2. Requires: NVIDIA driver on Windows side.
 set -euo pipefail
+set -x
 
 echo "=== Checking CUDA ==="
 if ! nvidia-smi &>/dev/null; then

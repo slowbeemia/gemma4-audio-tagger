@@ -14,6 +14,7 @@ dependencies = [
     "librosa>=0.10.0",
     "soundfile>=0.12.0",
     "pillow",
+    "google-genai>=2.8.0",
 ]
 
 [tool.uv]
