@@ -207,11 +207,15 @@ def main() -> None:
 
     log("Loading model (4-bit, this takes ~2 min first time)...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
+    from transformers import BitsAndBytesConfig
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
     model = AutoModelForMultimodalLM.from_pretrained(
         MODEL_ID,
         device_map="auto",
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        quantization_config=quantization_config,
     )
     log(f"Model loaded on: {model.device}")
 
