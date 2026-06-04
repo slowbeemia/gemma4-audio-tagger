@@ -4,3 +4,5 @@ tagger.log
 __pycache__/
 .venv/
 *.pyc
+.gemini_tagger_state.json
+gemini_tagger.log

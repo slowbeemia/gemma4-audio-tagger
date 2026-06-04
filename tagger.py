@@ -1,49 +1,30 @@
 #!/usr/bin/env python3
 """
-gemma4-audio-tagger — Batch audio tagging via Gemma 4 12B (HuggingFace Transformers).
+gemma4-audio-tagger — Batch audio tagging via Gemma 4 12B (llama.cpp).
 
-Uses the OFFICIAL Google-recommended API: AutoModelForMultimodalLM + AutoProcessor.
-Audio is passed via the chat template — no manual encoding needed.
+Connects to llama-server on localhost:8001. Audio is base64-encoded 16kHz
+mono WAV, sent as input_audio content blocks via the OpenAI-compatible API.
 
 Usage:
-    uv run python3 tagger.py                  # tag all untagged audio
-    uv run python3 tagger.py --max 10         # tag 10 files, then stop
+    uv run python3 tagger.py                  # tag next 10 untagged
+    uv run python3 tagger.py --max 10         # tag 10 files
     uv run python3 tagger.py --max 1          # test one file
     uv run python3 tagger.py --dry-run        # show what would be tagged
 """
-
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
+import subprocess
+import tempfile
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-import torch
-from transformers import AutoModelForMultimodalLM, AutoProcessor, pipeline
-
-# --- Monkeypatch for Gemma 4 Unified Multimodal Embedder 4-bit Quantization Bug ---
-try:
-    from transformers.models.gemma4_unified.modeling_gemma4_unified import Gemma4UnifiedMultimodalEmbedder
-    _old_forward = Gemma4UnifiedMultimodalEmbedder.forward
-
-    def _patched_forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        # If bitsandbytes 4-bit quantization is active, .weight.dtype is torch.uint8.
-        # We must cast to compute_dtype (or bfloat16) instead of uint8!
-        target_dtype = self.embedding_projection.weight.dtype
-        if target_dtype == torch.uint8:
-            target_dtype = getattr(self.embedding_projection, "compute_dtype", torch.bfloat16)
-        inputs_embeds = inputs_embeds.to(target_dtype)
-        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
-        return self.embedding_projection(embs_normed)
-
-    Gemma4UnifiedMultimodalEmbedder.forward = _patched_forward
-    print("[Patched] Gemma4UnifiedMultimodalEmbedder.forward monkeypatched successfully.", flush=True)
-except Exception as e:
-    print(f"Warning: Could not apply Gemma 4 Multimodal patch: {e}", flush=True)
 
 # --- Config ----------------------------------------------------------------
 
@@ -52,18 +33,16 @@ if _ENV_FILE.exists():
     from dotenv import load_dotenv
     load_dotenv(_ENV_FILE)
 
+LLAMA_SERVER_URL = os.getenv("LLAMA_SERVER_URL", "http://localhost:8001")
+LLAMA_MODEL = os.getenv("LLAMA_MODEL", "gemma-4-12b-it")
 ASSET_MANAGER_URL = os.getenv("ASSET_MANAGER_URL", "http://bob.fritz.box:8899")
 DELAY_SEC = float(os.getenv("DELAY_SEC", "2"))
 API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "50"))
 PATH_MAP_FROM = os.getenv("PATH_MAP_FROM", "//orange/Assets")
 PATH_MAP_TO = os.getenv("PATH_MAP_TO", "/mnt/orange")
 
-MODEL_ID = "google/gemma-4-12B-it"
-
 STATE_FILE = Path(__file__).parent / ".tagger_state.json"
 LOG_FILE = Path(__file__).parent / "tagger.log"
-
-# --- Audio prompt ----------------------------------------------------------
 
 SYSTEM_PROMPT = """You are an audio analysis expert for game development. Listen carefully to the audio and respond ONLY with a JSON object:
 
@@ -72,7 +51,7 @@ SYSTEM_PROMPT = """You are an audio analysis expert for game development. Listen
 Tags should be game-dev relevant categories (e.g. explosion, coin_loot, power_up, laser, ui_click, ambient_dark, magic_spell, footsteps, etc.).
 Output ONLY the JSON, no other text."""
 
-USER_PROMPT = """Analyze this audio clip for a game asset library. What kind of sound is this? Give 5-8 precise tags and a short German description."""
+USER_PROMPT = "Analyze this audio clip for a game asset library. What kind of sound is this? Give 5-8 precise tags and a short German description."
 
 
 def log(msg: str) -> None:
@@ -83,8 +62,7 @@ def log(msg: str) -> None:
         f.write(line + "\n")
 
 
-def fetch_untagged_assets(client: httpx.Client, page_size: int = 50) -> list[dict]:
-    """Fetch ALL untagged audio assets from Asset Manager API (paginated)."""
+def fetch_untagged(client: httpx.Client, page_size: int = 50) -> list[dict]:
     all_assets = []
     offset = 0
     while True:
@@ -99,37 +77,36 @@ def fetch_untagged_assets(client: httpx.Client, page_size: int = 50) -> list[dic
             batch = data.get("assets", [])
             total = data.get("total", 0)
             all_assets.extend(batch)
-            print(f"  ... fetched {len(all_assets)}/{total} from Asset Manager", flush=True)
             offset += page_size
             if offset >= total:
                 break
         except httpx.HTTPError as e:
             log(f"ERROR fetching assets at offset {offset}: {e}")
             break
-
     return all_assets
 
 
-def prepare_16khz_wav(audio_path: Path) -> str | None:
-    """Convert audio file to 16kHz mono WAV and return temp file path."""
-    import tempfile
-    import subprocess
-    
+def audio_to_base64_wav(filepath: Path) -> str | None:
+    """Convert any audio file to 16kHz mono WAV, return base64 string."""
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = tmp.name
     tmp.close()
 
     try:
-        # Convert to 16kHz mono WAV using ffmpeg
         cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
+            "ffmpeg", "-y", "-i", str(filepath),
             "-ar", "16000", "-ac", "1",
-            "-loglevel", "error", tmp_path
+            "-loglevel", "error", tmp_path,
         ]
         subprocess.run(cmd, check=True, timeout=10)
-        return tmp_path
+
+        with open(tmp_path, "rb") as f:
+            wav_bytes = f.read()
+
+        os.unlink(tmp_path)
+        return base64.b64encode(wav_bytes).decode("ascii")
     except Exception as e:
-        log(f"  ERROR: ffmpeg conversion failed for {audio_path}: {e}")
+        log(f"  ERROR: ffmpeg conversion failed for {filepath}: {e}")
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -138,137 +115,87 @@ def prepare_16khz_wav(audio_path: Path) -> str | None:
 
 
 def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
-    """Send audio to Gemma 4 12B via HuggingFace Transformers."""
+    """Send audio to llama-server via input_audio content block."""
     local_path = full_path.replace(PATH_MAP_FROM, PATH_MAP_TO, 1)
     path = Path(local_path)
     if not path.exists():
         log(f"  SKIP: file not found: {local_path}")
         return None
 
-    # Pre-resample the audio using FFmpeg to guarantee 16kHz mono WAV
-    temp_wav = prepare_16khz_wav(path)
-    if not temp_wav:
+    b64_wav = audio_to_base64_wav(path)
+    if not b64_wav:
         return None
 
-    # Use standard user role content items for multimodal chat templates
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": USER_PROMPT},
-                {"type": "audio", "audio": temp_wav},
-            ],
-        },
-    ]
+    payload = {
+        "model": LLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": USER_PROMPT},
+                    {"type": "input_audio", "input_audio": {"data": b64_wav}},
+                ],
+            },
+        ],
+        "temperature": 0.0,
+        "max_tokens": 300,
+    }
 
     try:
-        # Official standard HF multimodal processing: apply_chat_template with tokenize=True
-        # automatically loads the audio, resamples, and compiles all input tensors.
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-            enable_thinking=False,
-        ).to(model.device)
+        with httpx.Client(timeout=httpx.Timeout(120)) as client:
+            resp = client.post(
+                f"{LLAMA_SERVER_URL}/v1/chat/completions",
+                json=payload,
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        log(f"  ERROR: llama-server request failed: {e}")
+        return None
 
-        input_len = inputs["input_ids"].shape[-1]
+    data = resp.json()
+    content = data["choices"][0]["message"]["content"]
 
-        # Use the modern GenerationConfig API to completely eliminate deprecation warnings
-        from transformers import GenerationConfig
-        gen_config = GenerationConfig.from_model_config(model.config)
-        gen_config.max_new_tokens = 300
-        gen_config.do_sample = False
-        gen_config.temperature = None
-        gen_config.top_p = None
-        gen_config.top_k = None
+    # Log raw output for debugging
+    log(f"  [RAW] {repr(content)[:300]}")
 
-        with torch.no_grad():
-            outputs = model.generate(**inputs, generation_config=gen_config)
+    # Clean markdown code fences
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
 
-        # Decode only the generated response tokens
-        content = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
-
-        # Log raw output for debugging
-        log(f"  [RAW MODEL OUTPUT] {repr(content)}")
-
-        # Clean content
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
-
-        # Clean up temp file
-        try:
-            os.unlink(temp_wav)
-        except Exception:
-            pass
-
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            # Fallback: Extract JSON using regex
-            import re
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            if match:
-                try:
-                    return json.loads(match.group(0))
-                except json.JSONDecodeError as e:
-                    log(f"  ERROR: Failed parsing regex-extracted JSON: {e}")
-            log(f"  ERROR: Content is not valid JSON.")
-            return None
-
-    except Exception as e:
-        # Clean up temp file
-        try:
-            os.unlink(temp_wav)
-        except Exception:
-            pass
-        log(f"  ERROR: inference failed: {e}")
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError as e:
+                log(f"  ERROR: JSON parse failed on regex match: {e}")
+        log(f"  ERROR: Content is not valid JSON.")
         return None
 
 
 def send_to_asset_manager(asset_id: int, tags: dict, client: httpx.Client) -> bool:
-    """Send tags to Asset Manager API."""
     try:
         resp = client.post(
             f"{ASSET_MANAGER_URL}/api/audio-assets/{asset_id}/tag",
             json={
                 "tags": tags.get("tags", ""),
                 "description": tags.get("description", ""),
-                "notes": "gemma4-12b",
+                "notes": "gemma4-12b-llama.cpp",
             },
             timeout=10,
         )
         resp.raise_for_status()
-        return True
+        return resp.json().get("ok", False)
     except Exception as e:
-        log(f"  ERROR: Asset Manager API failed: {e}")
+        log(f"  ERROR posting to Asset Manager: {e}")
         return False
-
-
-def report_status(client: httpx.Client, state: dict, status: str = "running") -> None:
-    try:
-        client.post(
-            f"{ASSET_MANAGER_URL}/api/tagging-status",
-            json={
-                "host": "thegrey-gemma4",
-                "model": MODEL_ID,
-                "version": "1.0",
-                "status": status,
-                "current": state["tagged"],
-                "total": state["total"],
-                "errors": state["errors"],
-                "runtime_s": state.get("runtime_s", 0),
-            },
-            timeout=5,
-        )
-    except Exception:
-        pass
 
 
 def load_state() -> dict:
@@ -284,47 +211,36 @@ def save_state(state: dict) -> None:
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Gemma 4 12B Audio Tagger")
+    parser = argparse.ArgumentParser(description="Gemma 4 12B Audio Tagger (llama.cpp)")
     parser.add_argument("--max", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
     log("=" * 60)
-    log("Gemma 4 12B Audio Tagger (Transformers)")
-    log(f"Model: {MODEL_ID}")
+    log("Gemma 4 12B Audio Tagger (llama.cpp)")
+    log(f"Server: {LLAMA_SERVER_URL}")
+    log(f"Model:  {LLAMA_MODEL}")
     log(f"Asset Manager: {ASSET_MANAGER_URL}")
 
-    # --- Load model (shared across all inferences) ---
-    global processor, model
+    # Quick health check
+    try:
+        r = httpx.get(f"{LLAMA_SERVER_URL}/v1/models", timeout=5)
+        r.raise_for_status()
+        log(f"llama-server: OK ({r.json().get('data', [{}])[0].get('id', '?')})")
+    except Exception as e:
+        log(f"FATAL: llama-server not reachable: {e}")
+        sys.exit(1)
 
-    log("Loading model (4-bit, this takes ~2 min first time)...")
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    from transformers import BitsAndBytesConfig
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-    )
-    model = AutoModelForMultimodalLM.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-        quantization_config=quantization_config,
-        dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-    )
-    log(f"Model loaded on: {model.device}")
-
-
-
-    # --- Fetch untagged assets ---
     mgr = httpx.Client(timeout=httpx.Timeout(30))
 
     log("Fetching untagged audio from Asset Manager...")
-    assets = fetch_untagged_assets(mgr, API_PAGE_SIZE)
+    assets = fetch_untagged(mgr, API_PAGE_SIZE)
+    log(f"Found {len(assets)} untagged audio assets")
 
     if args.dry_run:
-        log(f"Dry-run: {len(assets)} untagged audio assets would be tagged")
         for a in assets[:20]:
-            print(f"  #{a['id']}  {a['filename']}  ({a.get('duration', 0):.1f}s)  {a['rel_path']}")
+            print(f"  #{a['id']}  {a['filename']}  ({a.get('duration', 0):.1f}s)")
         if len(assets) > 20:
             print(f"  ... and {len(assets) - 20} more")
         return
@@ -333,32 +249,33 @@ def main() -> None:
     if args.reset:
         state = {"tagged": 0, "errors": 0, "processed": [], "total": 0, "runtime_s": 0}
     processed = set(state.get("processed", []))
-    state["total"] = len(assets)
+    max_count = args.max if args.max else 10
+    state["total"] = max_count
     start_time = time.time()
 
-    report_status(mgr, state, "running")
-
     tagged = 0
-    for i, asset in enumerate(assets):
+    for asset in assets:
         asset_id = asset["id"]
         filename = asset["filename"]
         full_path = asset["full_path"]
-        rel_path = asset.get("rel_path", filename)
 
         if str(asset_id) in processed:
             continue
+        if tagged >= max_count:
+            break
 
-        limit_msg = f" (--max={args.max})" if args.max else ""
-        log(f"[{tagged + 1}/{min(state['total'], args.max or state['total'])}{limit_msg}] #{asset_id} {filename}")
+        log(f"[{tagged + 1}/{max_count}] #{asset_id} {filename}")
 
-        result = tag_audio(full_path, filename, rel_path)
+        result = tag_audio(full_path, filename, asset.get("rel_path", filename))
         if result:
+            log(f"  Tags: {result.get('tags', '—')[:100]}")
+            if result.get("description"):
+                log(f"  Desc:  {result['description'][:120]}")
             if send_to_asset_manager(asset_id, result, mgr):
                 tagged += 1
                 state["tagged"] += 1
-                log(f"  ✓ {result.get('tags', '')[:100]}")
-                if result.get("description"):
-                    log(f"    {result['description'][:120]}")
+            else:
+                state["errors"] += 1
         else:
             state["errors"] += 1
 
@@ -366,21 +283,14 @@ def main() -> None:
         state["processed"] = list(processed)
         state["runtime_s"] = int(time.time() - start_time)
 
-        if tagged % 10 == 0:
+        if tagged % 5 == 0:
             save_state(state)
-            report_status(mgr, state, "running")
-
-        if args.max and tagged >= args.max:
-            log(f"Reached --max={args.max}, stopping.")
-            break
 
         time.sleep(DELAY_SEC)
 
     state["runtime_s"] = int(time.time() - start_time)
     save_state(state)
-    report_status(mgr, state, "completed")
-
-    log(f"Done! Tagged: {state['tagged']}, Errors: {state['errors']}, Runtime: {state['runtime_s']}s")
+    log(f"Done! Tagged: {tagged}, Errors: {state['errors']}, Runtime: {state['runtime_s']}s")
 
 
 if __name__ == "__main__":
