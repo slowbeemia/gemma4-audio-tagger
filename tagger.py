@@ -181,6 +181,9 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         gen_config = GenerationConfig.from_model_config(model.config)
         gen_config.max_new_tokens = 300
         gen_config.do_sample = False
+        gen_config.temperature = None
+        gen_config.top_p = None
+        gen_config.top_k = None
 
         with torch.no_grad():
             outputs = model.generate(**inputs, generation_config=gen_config)
