@@ -23,7 +23,7 @@ from pathlib import Path
 
 import httpx
 import torch
-from transformers import AutoModelForMultimodalLM, AutoProcessor
+from transformers import AutoModelForMultimodalLM, AutoProcessor, pipeline
 
 # --- Config ----------------------------------------------------------------
 
@@ -98,42 +98,31 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         log(f"  SKIP: file not found: {local_path}")
         return None
 
-    # Use local file path — processor handles loading
-    audio_uri = f"file://{path.absolute()}"
-
+    # Pass the local file path string directly — pipeline handles loading and resampling
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": USER_PROMPT},
-                {"type": "audio", "audio": audio_uri},
+                {"type": "audio", "audio": local_path},
             ],
         },
     ]
 
     try:
-        inputs = processor.apply_chat_template(
+        outputs = pipe(
             messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-            enable_thinking=False,
-        ).to(model.device)
-
-        input_len = inputs["input_ids"].shape[-1]
-
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=300)
-
-        response = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
-        parsed = processor.parse_response(response)
-
-        # Extract content from parsed response
-        content = parsed.get("content", response)
-        if isinstance(content, list):
-            content = content[0].get("text", "") if content else ""
+            return_full_text=False,
+            generate_kwargs={
+                "max_new_tokens": 300,
+                "do_sample": True,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 64
+            }
+        )
+        content = outputs[0]["generated_text"]
 
         # Strip markdown fences
         content = content.strip()
@@ -214,7 +203,7 @@ def main() -> None:
     log(f"Asset Manager: {ASSET_MANAGER_URL}")
 
     # --- Load model (shared across all inferences) ---
-    global processor, model
+    global processor, model, pipe
 
     log("Loading model (4-bit, this takes ~2 min first time)...")
     processor = AutoProcessor.from_pretrained(MODEL_ID)
@@ -225,6 +214,9 @@ def main() -> None:
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
     log(f"Model loaded on: {model.device}")
+
+    log("Initializing multimodal any-to-any pipeline...")
+    pipe = pipeline("any-to-any", model=model, processor=processor)
 
     # --- Fetch untagged assets ---
     mgr = httpx.Client(timeout=httpx.Timeout(30))
