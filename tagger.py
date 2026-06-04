@@ -302,13 +302,11 @@ def main() -> None:
     processor = AutoProcessor.from_pretrained(MODEL_ID)
     from transformers import BitsAndBytesConfig
     quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        llm_int8_skip_modules=["embed_audio", "embed_vision", "embedding_projection"],
+        load_in_8bit=True,
     )
     model = AutoModelForMultimodalLM.from_pretrained(
         MODEL_ID,
-        device_map="cuda:0",
+        device_map="auto",
         quantization_config=quantization_config,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
