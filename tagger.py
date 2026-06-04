@@ -144,15 +144,30 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         )
         content = outputs[0]["generated_text"]
 
-        # Strip markdown fences
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[-1]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
+        # Log raw output for debugging
+        log(f"  [RAW MODEL OUTPUT] {repr(content)}")
 
-        return json.loads(content)
+        # Clean content
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Fallback: Extract JSON using regex
+            import re
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError as e:
+                    log(f"  ERROR: Failed parsing regex-extracted JSON: {e}")
+            log(f"  ERROR: Content is not valid JSON.")
+            return None
 
     except Exception as e:
         log(f"  ERROR: inference failed: {e}")
