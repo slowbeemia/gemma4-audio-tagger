@@ -138,7 +138,6 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         "--audio", wav_path,
         "--temp", "0.0",
         "-p", full_prompt,
-        "--no-display-prompt",
     ]
 
     try:
