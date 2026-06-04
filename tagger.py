@@ -110,6 +110,33 @@ def fetch_untagged_assets(client: httpx.Client, page_size: int = 50) -> list[dic
     return all_assets
 
 
+def prepare_16khz_wav(audio_path: Path) -> str | None:
+    """Convert audio file to 16kHz mono WAV and return temp file path."""
+    import tempfile
+    import subprocess
+    
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        # Convert to 16kHz mono WAV using ffmpeg
+        cmd = [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ar", "16000", "-ac", "1",
+            "-loglevel", "error", tmp_path
+        ]
+        subprocess.run(cmd, check=True, timeout=10)
+        return tmp_path
+    except Exception as e:
+        log(f"  ERROR: ffmpeg conversion failed for {audio_path}: {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return None
+
+
 def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
     """Send audio to Gemma 4 12B via HuggingFace Transformers."""
     local_path = full_path.replace(PATH_MAP_FROM, PATH_MAP_TO, 1)
@@ -118,14 +145,18 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
         log(f"  SKIP: file not found: {local_path}")
         return None
 
-    # Pass the local file path string directly — pipeline handles loading and resampling
+    # Force conversion to 16kHz mono WAV to guarantee correct sample rate for the model
+    temp_wav = prepare_16khz_wav(path)
+    if not temp_wav:
+        return None
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": USER_PROMPT},
-                {"type": "audio", "audio": local_path},
+                {"type": "audio", "audio": temp_wav},
             ],
         },
     ]
@@ -155,6 +186,12 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
 
+        # Clean up temp file
+        try:
+            os.unlink(temp_wav)
+        except Exception:
+            pass
+
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
@@ -170,6 +207,11 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
             return None
 
     except Exception as e:
+        # Clean up temp file
+        try:
+            os.unlink(temp_wav)
+        except Exception:
+            pass
         log(f"  ERROR: inference failed: {e}")
         return None
 
