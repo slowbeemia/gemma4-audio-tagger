@@ -216,6 +216,8 @@ def main() -> None:
         MODEL_ID,
         device_map="auto",
         quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
     )
     log(f"Model loaded on: {model.device}")
 
