@@ -25,6 +25,26 @@ import httpx
 import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor, pipeline
 
+# --- Monkeypatch for Gemma 4 Unified Multimodal Embedder 4-bit Quantization Bug ---
+try:
+    from transformers.models.gemma4_unified.modeling_gemma4_unified import Gemma4UnifiedMultimodalEmbedder
+    _old_forward = Gemma4UnifiedMultimodalEmbedder.forward
+
+    def _patched_forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        # If bitsandbytes 4-bit quantization is active, .weight.dtype is torch.uint8.
+        # We must cast to compute_dtype (or bfloat16) instead of uint8!
+        target_dtype = self.embedding_projection.weight.dtype
+        if target_dtype == torch.uint8:
+            target_dtype = getattr(self.embedding_projection, "compute_dtype", torch.bfloat16)
+        inputs_embeds = inputs_embeds.to(target_dtype)
+        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        return self.embedding_projection(embs_normed)
+
+    Gemma4UnifiedMultimodalEmbedder.forward = _patched_forward
+    print("[Patched] Gemma4UnifiedMultimodalEmbedder.forward monkeypatched successfully.", flush=True)
+except Exception as e:
+    print(f"Warning: Could not apply Gemma 4 Multimodal patch: {e}", flush=True)
+
 # --- Config ----------------------------------------------------------------
 
 _ENV_FILE = Path(__file__).parent / ".env"
