@@ -304,6 +304,7 @@ def main() -> None:
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
+        llm_int8_skip_modules=["embed_audio", "embed_vision", "embedding_projection"],
     )
     model = AutoModelForMultimodalLM.from_pretrained(
         MODEL_ID,
