@@ -110,53 +110,68 @@ def fetch_untagged_assets(client: httpx.Client, page_size: int = 50) -> list[dic
     return all_assets
 
 
+def prepare_16khz_wav(audio_path: Path) -> str | None:
+    """Convert audio file to 16kHz mono WAV and return temp file path."""
+    import tempfile
+    import subprocess
+    
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        # Convert to 16kHz mono WAV using ffmpeg
+        cmd = [
+            "ffmpeg", "-y", "-i", str(audio_path),
+            "-ar", "16000", "-ac", "1",
+            "-loglevel", "error", tmp_path
+        ]
+        subprocess.run(cmd, check=True, timeout=10)
+        return tmp_path
+    except Exception as e:
+        log(f"  ERROR: ffmpeg conversion failed for {audio_path}: {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        return None
+
+
 def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
     """Send audio to Gemma 4 12B via HuggingFace Transformers."""
-    import librosa
-    
     local_path = full_path.replace(PATH_MAP_FROM, PATH_MAP_TO, 1)
     path = Path(local_path)
     if not path.exists():
         log(f"  SKIP: file not found: {local_path}")
         return None
 
-    try:
-        # Load and resample audio to 16kHz mono float32 using librosa
-        # librosa handles any audio format (WAV, MP3, OGG, FLAC) seamlessly
-        audio_data, _ = librosa.load(str(path), sr=16000, mono=True)
-    except Exception as e:
-        log(f"  ERROR: Failed to load/resample audio {local_path}: {e}")
+    # Pre-resample the audio using FFmpeg to guarantee 16kHz mono WAV
+    temp_wav = prepare_16khz_wav(path)
+    if not temp_wav:
         return None
 
-    # Merge system and user prompts into a single user message for better on-device prompt execution
-    prompt_text = f"{SYSTEM_PROMPT}\n\n{USER_PROMPT}"
-
+    # Use standard user role content items for multimodal chat templates
     messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt_text},
-                {"type": "audio", "audio": local_path}, # Keep "audio" in the content structure so the template inserts <audio>
+                {"type": "text", "text": USER_PROMPT},
+                {"type": "audio", "audio": temp_wav},
             ],
         },
     ]
 
     try:
-        # Format the text prompt using the chat template (WITHOUT tokenizing)
-        prompt = processor.apply_chat_template(
+        # Official standard HF multimodal processing: apply_chat_template with tokenize=True
+        # automatically loads the audio, resamples, and compiles all input tensors.
+        inputs = processor.apply_chat_template(
             messages,
-            tokenize=False,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
             add_generation_prompt=True,
             enable_thinking=False,
-        )
-
-        # Process BOTH the text prompt and the pre-loaded 16kHz audio waveforms directly!
-        # This guarantees the model receives the actual audio features and input masks.
-        inputs = processor(
-            text=prompt,
-            audio=audio_data,
-            sampling_rate=16000,
-            return_tensors="pt"
         ).to(model.device)
 
         input_len = inputs["input_ids"].shape[-1]
@@ -187,6 +202,12 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
 
+        # Clean up temp file
+        try:
+            os.unlink(temp_wav)
+        except Exception:
+            pass
+
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
@@ -202,6 +223,11 @@ def tag_audio(full_path: str, filename: str, rel_path: str) -> dict | None:
             return None
 
     except Exception as e:
+        # Clean up temp file
+        try:
+            os.unlink(temp_wav)
+        except Exception:
+            pass
         log(f"  ERROR: inference failed: {e}")
         return None
 
