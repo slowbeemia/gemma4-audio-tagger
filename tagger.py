@@ -313,6 +313,8 @@ def main() -> None:
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
+    log("Moving model to CUDA to initialize 4-bit quantization states...")
+    model = model.to("cuda")
     log(f"Model loaded on: {model.device}")
 
 
