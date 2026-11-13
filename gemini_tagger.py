@@ -53,7 +53,7 @@ DELAY_SEC = float(os.getenv("DELAY_SEC", "3"))
 API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "50"))
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "1500"))  # Gemini free tier
 PATH_MAP_FROM = os.getenv("PATH_MAP_FROM", "//orange/Assets")
-PATH_MAP_TO = os.getenv("PATH_MAP_TO", "/mnt/orange")
+PATH_MAP_TO = os.getenv("PATH_MAP_TO", "//orange/Assets")
 
 STATE_FILE = Path(__file__).parent / ".gemini_tagger_state.json"
 LOG_FILE = Path(__file__).parent / "gemini_tagger.log"
@@ -134,6 +134,7 @@ def tag_one(client_gemini: genai.Client, local_path: Path) -> dict | None:
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0.0,
                 response_mime_type="application/json",
+                max_output_tokens=300,
             ),
         )
     except Exception as e:

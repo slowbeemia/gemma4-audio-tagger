@@ -1,0 +1,7 @@
+model_list:
+  - model_name: gemma4:12b
+    litellm_params:
+      model: ollama_chat/gemma4:12b
+      api_base: http://127.0.0.1:11434
+      num_predict: 1000
+      temperature: 0.0

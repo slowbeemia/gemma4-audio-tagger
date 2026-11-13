@@ -1,69 +1,64 @@
-# Gemma 4 Audio Tagger
+# Gemma 4 Audio Tagger (PowerShell + Windows)
 
-Batch audio tagging via **Gemma 4 12B** auf TheGrey (llama.cpp + RTX 3060).
+Batch audio tagging via **Gemma 4 12B** running locally on Windows (Ollama + LiteLLM Proxy + AMD GPU ROCm).
 
 ## Architektur
 
 ```
-┌──────────────┐     ┌─────────────────┐     ┌──────────────┐
-│  Audio file  │────▶│  llama-server   │────▶│  Asset       │
-│  (beliebiges  │     │  Gemma 4 12B    │     │  Manager API │
-│   Format)     │     │  :8001          │     │  :8899       │
-└──────────────┘     └─────────────────┘     └──────────────┘
-       ▲                     │                      │
-       │                     ▼                      ▼
-   /mnt/orange          JSON tags +           Status auf Bob
-   (Orange SMB)         description
+[ Remote-Node: bob ] (Führt Audio-Tagger aus via Google GenAI SDK)
+         │
+         ▼ (Netzwerk-Request via HTTP auf Port 9379)
+[ Host: doitagain ]
+   ├── ① LiteLLM Proxy (Port 9379) ──► Übersetzt Google GenAI Format in Ollama API
+   ├── ② Ollama Backend (Port 11434) ──► Verwaltet die AMD-Modellausführung via ROCm
+   └── ③ Gemma 4 12B (Lokales Modell) ──► Berechnet die native Multimodal-Audio-Analyse
 ```
 
-Audio wird per ffmpeg → 16kHz mono WAV → base64 → `input_audio` Content Block an llama-server gesendet.
+Audio wird per ffmpeg → 16kHz mono WAV → base64 → `Part.from_bytes` an den lokalen LiteLLM Proxy gesendet, welcher die Anfrage übersetzt und an Ollama weiterleitet.
 
-## Quick Start (TheGrey)
+## Quick Start (Windows / doitagain)
 
-```bash
-cd ~/Projekte/gemma4-audio-tagger
-git pull
+1. **Einrichten (einmalig):**
+   Öffne eine PowerShell in diesem Ordner und führe das Setup-Skript aus:
+   ```powershell
+   .\Setup-Tagger.ps1
+   ```
+   Dieses Skript:
+   - Synchronisiert die Python-Abhängigkeiten via `uv sync`.
+   - Lädt das `gemma4:12b` Modell via Ollama herunter.
+   - Prüft, ob `ffmpeg` installiert ist.
 
-# 1. Dependencies (nur httpx + python-dotenv, kein torch!)
-uv sync
+2. **Dienste starten:**
+   Starte die Backend-Dienste (Ollama und den LiteLLM Proxy):
+   ```powershell
+   .\Start-Services.ps1
+   ```
+   Dies startet Ollama im Hintergrund (falls nicht aktiv) und öffnet ein neues PowerShell-Fenster für den LiteLLM-Proxy auf Port `9379`.
 
-# 2. .env erstellen
-cp .env.example .env
-# Prüfe: LLAMA_SERVER_URL, ASSET_MANAGER_URL, PATH_MAP_TO
+3. **Konfiguration anpassen:**
+   Erstelle deine `.env`-Datei:
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+   Passe ggf. den `LITELLM_PROXY_URL` (z. B. auf `http://192.168.178.82:9379` falls du von einem Remote-Node wie `bob` zugreifst) und den `ASSET_MANAGER_URL` an.
 
-# 3. llama-server starten (vorher!)
-./start_server.sh
+4. **Test & Batch:**
+   Führe den Tagger aus:
+   ```powershell
+   # Dry-Run (zeigt an, welche Dateien getaggt würden)
+   uv run python tagger.py --dry-run
 
-# 4. Test mit einem Asset
-uv run python3 tagger.py --max 1 --reset
+   # Test mit einem Asset
+   uv run python tagger.py --max 1 --reset
 
-# 5. Batch
-uv run python3 tagger.py --max 100
-```
+   # Batch-Verarbeitung von 100 Assets
+   uv run python tagger.py --max 100
+   ```
 
-## Voraussetzungen auf TheGrey
+## Voraussetzungen auf Windows
 
-| Was | Befehl |
-|-----|--------|
-| llama.cpp mit CUDA | `./setup_llama_cpp.sh` |
-| GGUF Model + mmproj | `./download_model.sh` → `/home/dirk/gemma4-models/` |
-| Orange SMB Mount | `sudo mount -t drvfs '\\orange\Assets' /mnt/orange` |
-| llama-server läuft | `./start_server.sh` → `:8001` |
-
-## Model
-
-- **Datei:** `/home/dirk/gemma4-models/gemma-4-12b-it-UD-Q4_K_XL.gguf`
-- **MMProj:** `/home/dirk/gemma4-models/mmproj-BF16.gguf`
-- **Quant:** UD-Q4_K_XL (Unsloth Dynamic, ~7.5 GB)
-- **VRAM:** ~8 GB auf RTX 3060 12GB
-
-## Audio-Format
-
-- Input: beliebig (WAV, MP3, OGG, FLAC)
-- Automatisch via ffmpeg → 16kHz mono WAV → base64
-- Files > 30s werden vom Modell nicht verarbeitet (Hardware-Limit)
-
-## Alternativen
-
-- `gemini_tagger.py` — Gemini 3.5 Flash Cloud API (für Bob, teurer)
-- `test_gemini_audio.py` — Einzeltest Gemini Audio
+| Komponente | Empfohlener Installationsweg |
+|------------|------------------------------|
+| **Ollama** | [ollama.com](https://ollama.com/) (Unterstützt AMD ROCm automatisch) |
+| **uv** | `winget install astral-sh.uv` |
+| **ffmpeg** | `winget install Gyan.FFmpeg` |

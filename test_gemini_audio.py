@@ -11,9 +11,15 @@ import sys
 import time
 from pathlib import Path
 
+# Load env
+_ENV_FILE = Path(__file__).parent / ".env"
+if _ENV_FILE.exists():
+    from dotenv import load_dotenv
+    load_dotenv(_ENV_FILE)
+
 # Load GOOGLE_API_KEY from Hermes .env
 _HERMES_ENV = Path.home() / ".hermes" / ".env"
-if _HERMES_ENV.exists():
+if _HERMES_ENV.exists() and not os.environ.get("GOOGLE_API_KEY"):
     from dotenv import load_dotenv
     load_dotenv(_HERMES_ENV)
 
@@ -123,9 +129,9 @@ def _cleanup(client, file_name: str) -> None:
 
 # --- Audio files to test ---
 TEST_FILES = [
-    "/mnt/orange/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_01.wav",
-    "/mnt/orange/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_04.wav",
-    "/mnt/orange/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_08.wav",
+    "//orange/Assets/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_01.wav",
+    "//orange/Assets/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_04.wav",
+    "//orange/Assets/Music/100_Retro_Game_Sounds_SFX_[VOLUME1]_24 bits_44.1KHz_WAV_CC-BY-3.0_by_jalastram/Retro_Game_Sounds_SFX_08.wav",
 ]
 
 if __name__ == "__main__":
